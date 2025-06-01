@@ -6,6 +6,7 @@ export default [
         input: {
             'index': 'src/index.ts',
             'jsx-runtime': 'src/jsx-runtime.ts',
+            'jsx-dev-runtime': 'src/jsx-dev-runtime.ts',
         },
         external: ['@lib/utils'],
         output: [

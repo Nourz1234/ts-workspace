@@ -18,10 +18,12 @@
         "**/.pnp.*": true
     },
     "cSpell.words": [
+        "csstype",
         "dprint",
         "fullscreen",
         "iife",
         "jsdocify",
+        "jsxs",
         "tampermonkey",
         "userscript"
     ]

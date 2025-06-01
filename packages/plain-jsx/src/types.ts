@@ -1,9 +1,10 @@
 import type { MaybePromise, MethodsOf, ReadonlyProps, Setter } from '@lib/utils';
 import type { Properties as CSS } from 'csstype';
+import type { Observable } from './observable';
 
 export type PropsType = Record<string, unknown>;
 
-/* vnode */
+/* VNode */
 export interface VNodeElement {
     type: string | FunctionalComponent;
     props: PropsType;
@@ -11,11 +12,12 @@ export interface VNodeElement {
     isDev: boolean;
 }
 
-export type VNode = VNodeElement | string | number | boolean | null | undefined;
+export type VNode = Observable<VNode> | VNodeElement | string | number | boolean | null | undefined;
 export type VNodeChildren = VNode | VNode[];
 export type FunctionalComponent<TProps = PropsType, TRef = never> = (
-    props: TProps & CustomProps,
-    events: ComponentEvents<TRef>,
+    props: TProps & CustomProps & RefProp<TRef>,
+    events: ComponentEvents,
+    helpers: Helpers<TRef>,
 ) => VNode;
 
 /* handlers */
@@ -23,23 +25,26 @@ export type RefType<T extends FunctionalComponent<never, unknown>> = T extends
     FunctionalComponent<never, infer TRef> ? TRef
     : never;
 
-interface GetRef {
-    (name: string): unknown;
-    <T extends Element>(name: string): T;
-    <T extends FunctionalComponent<never, unknown>>(name: string): RefType<T>;
-}
+export type SetupHandler = () => Promise<void>;
+export type EventHandler = () => MaybePromise<void>;
+export type ErrorCapturedHandler = (error: unknown) => boolean | void;
 
-export interface MountedHandlerUtils<TRef> {
-    getRef: GetRef;
+interface Helpers<TRef> {
+    /**
+     * A helper function to define the component's ref interface.
+     * @example
+     * const Counter = () => {
+     *      const count = createObservable<number>(0);
+     *      const increment = () => count.value += 1;
+     *      // this object will be exposed via the ref keyword of this component
+     *      defineRef({ increment });
+     *      return <button onClick={increment}>Count is {count}</button>;
+     * };
+     */
     defineRef: Setter<TRef>;
 }
 
-export type SetupHandler = () => Promise<void>;
-export type EventHandler = () => MaybePromise<void>;
-export type MountedHandler<TRef> = (utils: MountedHandlerUtils<TRef>) => MaybePromise<void>;
-export type ErrorCapturedHandler = (error: unknown) => boolean | void;
-
-export interface ComponentEvents<TRef> {
+export interface ComponentEvents {
     /**
      * Registers an async handler that runs immediately after the functional component returns.
      * Useful for running asynchronous setup code within the component body (before mounting).
@@ -48,40 +53,46 @@ export interface ComponentEvents<TRef> {
      * If you want to show placeholder content during data fetching, use `onMounted` instead.
      *
      * @example
-     * onSetup(async () => {
-     *   // Functional components can't be async, so use this for async setup.
-     *   const data = await fetchData();
-     * });
+     * const AsyncComponent = (props, { onSetup }) => {
+     *      const message = createObservable<string | null>(null);
+     *      // Functional components can't be async, so use this for async setup.
+     *      onSetup(async () => {
+     *          message.value = await fetchMessage();
+     *      });
+     *      return <span>{message}</span>
+     * };
      */
     onSetup: (handler: SetupHandler) => void;
     /**
      * Registers a handler (can be async) that runs when the component is inserted into the active DOM.
-     * The handler receives an object with helpers to get child refs or define the component's ref interface.
      *
      * @example
-     * onMounted(({ getRef, defineRef }) => {
-     *   const elem = getRef('elem');
-     *
-     *   defineRef({
-     *     increment: () => { },
-     *     decrement: () => { },
-     *     getCount: () => { }
-     *   });
-     * });
+     * const Button = (props, { onMounted }) => {
+     *      const button = createObservable<HTMLButtonElement | null>(null);
+     *      onMounted(() => {
+     *          // can do stuff with button here
+     *      });
+     *      return <button ref={button} />;
+     * };
      */
-    onMounted: (handler: MountedHandler<TRef>) => void;
+    onMounted: (handler: EventHandler) => void;
+    /**
+     * Registers a handler (can be async) that runs when the component is removed from the active DOM.
+     */
+    onUnmounted: (handler: EventHandler) => void;
     /**
      * Registers a handler (can be async) that runs on the tick immediately after the `onMounted` event.
      * Useful for actions that require the DOM to be fully updated, such as setting focus.
      *
      * @example
-     * let input;
-     * onMounted(({ getRef }) => {
-     *   input = getRef('input');
-     * });
-     * onReady(() => {
-     *   input.focus();
-     * });
+     * const Input = ({ focus }, { onReady }) => {
+     *      const input = createObservable<HTMLInputElement | null>(null);
+     *      onReady(() => {
+     *          if (focus)
+     *              input.value?.focus();
+     *      });
+     *      return <input ref={input} type="text" />;
+     * };
      */
     onReady: (handler: EventHandler) => void;
     /**
@@ -97,14 +108,18 @@ export interface ComponentEvents<TRef> {
 
 /* common and custom props */
 interface CustomProps {
-    ref?: string;
     children?: VNodeChildren;
+}
+
+interface RefProp<T> {
+    ref?: Observable<T | null>;
 }
 
 type CommonProps<T extends Element> =
     & (T extends ElementCSSInlineStyle ? { style?: CSS } : object)
     & (T extends HTMLOrSVGElement ? { dataset?: DOMStringMap } : object)
-    & CustomProps;
+    & CustomProps
+    & RefProp<T>;
 
 /* utilities */
 type SettableProps<T extends Element> = Omit<
@@ -126,12 +141,16 @@ type DOMEvents<T extends Element> = {
     ) => unknown;
 };
 
+type AcceptsObservable<T> = {
+    [K in keyof T]: T[K] | Observable<T[K]>;
+};
+
 /* all props */
 export type DOMProps<T extends Element> =
-    & Partial<SettableProps<T>>
+    & Partial<AcceptsObservable<SettableProps<T>>>
     & CommonProps<T>
     & DOMEvents<T>;
 
 export type SVGProps<T extends SVGElement> =
     & DOMProps<T>
-    & Record<string, unknown>; // no validation for svg props for now.
+    & AcceptsObservable<Record<string, unknown>>; // no validation for svg props for now.

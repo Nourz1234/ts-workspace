@@ -1,5 +1,4 @@
-import type { MaybePromise } from '@lib/utils';
-import type { DOMProps, FunctionalComponent, PropsType, SVGProps, VNode, VNodeChildren } from './types';
+import type { DOMProps, EventHandler, FunctionalComponent, PropsType, SVGProps, VNode, VNodeChildren } from './types';
 export declare const Fragment = "Fragment";
 export declare function createVNode(type: string | FunctionalComponent, props?: PropsType, children?: VNode[], isDev?: boolean): VNode;
 export declare function jsx(type: string | FunctionalComponent, props: {
@@ -10,8 +9,8 @@ export declare function jsxDEV(type: string | FunctionalComponent, props: {
     children?: VNodeChildren;
 }): VNode;
 export declare function createElement(tag: string | FunctionalComponent, props?: PropsType, ...children: VNode[]): VNode;
-export declare function render<TRef = unknown>(root: Element | DocumentFragment, element: VNode, handlers: {
-    onMounted: (ref?: TRef) => MaybePromise<void>;
+export declare function render(root: Element | DocumentFragment, element: VNode, handlers?: {
+    onMounted: EventHandler;
 }): Promise<void>;
 type DOMElement = Element;
 export declare namespace JSX {
