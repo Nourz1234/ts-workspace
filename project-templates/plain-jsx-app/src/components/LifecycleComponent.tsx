@@ -1,6 +1,6 @@
 import { createObservable, type FunctionalComponent } from '@lib/plain-jsx';
 
-const LifeTimeComponent: FunctionalComponent = (
+const LifecycleComponent: FunctionalComponent = (
     _props,
     { onMounted, onUnmounted, onReady, onRendered },
 ) => {
@@ -30,4 +30,4 @@ const LifeTimeComponent: FunctionalComponent = (
     return <button ref={button} title={title}>LifeTimeComponent</button>;
 };
 
-export { LifeTimeComponent };
+export { LifecycleComponent };

@@ -1,19 +1,29 @@
 import type { Action } from '@lib/utils';
 import type { EventHandler } from './types';
+type EventName = 'mounted' | 'unmounted' | 'ready' | 'rendered';
+type EventHandlerMap = Record<EventName, Set<EventHandler>>;
+export type LifecycleEventHandlers = {
+    priority: number;
+} & EventHandlerMap;
 export interface Registration {
     unregister: Action;
 }
-export declare class LifecycleEvents {
-    private readonly handlersMap;
-    private static readonly AddEvents;
-    private static readonly RemoveEvents;
-    constructor();
-    private domUpdated;
-    private static mergeHandlers;
-    private static handleChanges;
-    private register;
-    onMounted(node: Node, level: number, handler: EventHandler): Registration;
-    onUnmounted(node: Node, level: number, handler: EventHandler): Registration;
-    onReady(node: Node, level: number, handler: EventHandler): Registration;
-    onRendered(node: Node, level: number, handler: EventHandler): Registration;
-}
+declare function initialize(): void;
+declare function register(node: Node, priority: number, event: EventName, handler: EventHandler): Registration;
+declare function registerIndirect(node: Node, handlers: LifecycleEventHandlers): void;
+declare function onMounted(node: Node, priority: number, handler: EventHandler): Registration;
+declare function onUnmounted(node: Node, priority: number, handler: EventHandler): Registration;
+declare function onReady(node: Node, priority: number, handler: EventHandler): Registration;
+declare function onRendered(node: Node, priority: number, handler: EventHandler): Registration;
+declare function createLifecycleEventHandlers(priority: number): LifecycleEventHandlers;
+export declare const LifecycleEventManager: {
+    initialize: typeof initialize;
+    register: typeof register;
+    registerIndirect: typeof registerIndirect;
+    onMounted: typeof onMounted;
+    onUnmounted: typeof onUnmounted;
+    onReady: typeof onReady;
+    onRendered: typeof onRendered;
+    createLifecycleEventHandlers: typeof createLifecycleEventHandlers;
+};
+export {};

@@ -3,137 +3,162 @@ import type { EventHandler } from './types';
 
 type EventName = 'mounted' | 'unmounted' | 'ready' | 'rendered';
 type EventHandlerMap = Record<EventName, Set<EventHandler>>;
-type EventHandlers = {
-    level: number;
+export type LifecycleEventHandlers = {
+    priority: number;
 } & EventHandlerMap;
 
 export interface Registration {
     unregister: Action;
 }
 
-export class LifecycleEvents {
-    private readonly handlersMap = new WeakMap<Node, EventHandlers>();
-    private static readonly AddEvents: EventName[] = ['mounted', 'ready', 'rendered'];
-    private static readonly RemoveEvents: EventName[] = ['unmounted'];
+const AddEvents: EventName[] = ['mounted', 'ready', 'rendered'];
+const RemoveEvents: EventName[] = ['unmounted'];
+const nodeEventMap = new WeakMap<Node, LifecycleEventHandlers>();
 
-    public constructor() {
-        const observer = new MutationObserver(this.domUpdated.bind(this));
-        observer.observe(document.body, { childList: true, subtree: true });
+const observer = new MutationObserver(onDOMUpdated);
+let isInitialized = false;
+
+function initialize() {
+    if (isInitialized) {
+        return;
     }
+    isInitialized = true;
+    observer.observe(document.body, { childList: true, subtree: true });
+}
 
-    private domUpdated(mutations: MutationRecord[]) {
-        const handlersList: EventHandlers[] = [];
-        for (const mutation of mutations) {
-            for (const addedNode of iterNodeList(mutation.addedNodes)) {
-                const nodeHandlers = this.handlersMap.get(addedNode);
-                if (nodeHandlers) {
-                    LifecycleEvents.mergeHandlers(
-                        handlersList,
-                        nodeHandlers,
-                        LifecycleEvents.AddEvents,
-                    );
-                }
-            }
-            for (const removedNode of iterNodeList(mutation.removedNodes)) {
-                const nodeHandlers = this.handlersMap.get(removedNode);
-                if (nodeHandlers) {
-                    LifecycleEvents.mergeHandlers(
-                        handlersList,
-                        nodeHandlers,
-                        LifecycleEvents.RemoveEvents,
-                    );
-                }
-            }
-        }
-        void LifecycleEvents.handleChanges(handlersList);
+function register(
+    node: Node,
+    priority: number,
+    event: EventName,
+    handler: EventHandler,
+): Registration {
+    let handlers = nodeEventMap.get(node);
+    if (!handlers) {
+        handlers = createLifecycleEventHandlers(priority);
+        nodeEventMap.set(node, handlers);
     }
+    handlers[event].add(handler);
 
-    private static mergeHandlers(
-        handlersList: EventHandlers[],
-        nodeHandlers: EventHandlers,
-        events: EventName[],
-    ) {
-        let existingHandlers = handlersList.find(handlers => handlers.level === nodeHandlers.level);
-        if (!existingHandlers) {
-            existingHandlers = {
-                level: nodeHandlers.level,
-                mounted: new Set(),
-                ready: new Set(),
-                rendered: new Set(),
-                unmounted: new Set(),
-            };
-            handlersList.push(existingHandlers);
-        }
-        for (const event of events) {
-            existingHandlers[event] = existingHandlers[event].union(nodeHandlers[event]);
-        }
+    return {
+        unregister: () => handlers[event].delete(handler),
+    };
+}
+
+function registerIndirect(node: Node, handlers: LifecycleEventHandlers) {
+    let existingHandlers = nodeEventMap.get(node);
+    if (!existingHandlers) {
+        existingHandlers = createLifecycleEventHandlers(handlers.priority);
+        nodeEventMap.set(node, existingHandlers);
     }
+    mergeEventHandlers(existingHandlers, handlers, [
+        'mounted',
+        'unmounted',
+        'ready',
+        'rendered',
+    ]);
+}
 
-    private static async handleChanges(handlersList: EventHandlers[]) {
-        for (const handlers of handlersList) {
-            await Promise.all(
-                [...handlers.mounted, ...handlers.unmounted]
-                    .map((handler): MaybePromise<void> => handler()),
-            );
-        }
-        setTimeout(async () => {
-            for (const handlers of handlersList) {
-                await Promise.all(
-                    [...handlers.ready].map((handler): MaybePromise<void> => handler()),
+function onMounted(node: Node, priority: number, handler: EventHandler) {
+    return register(node, priority, 'mounted', handler);
+}
+
+function onUnmounted(node: Node, priority: number, handler: EventHandler) {
+    return register(node, priority, 'unmounted', handler);
+}
+
+function onReady(node: Node, priority: number, handler: EventHandler) {
+    return register(node, priority, 'ready', handler);
+}
+
+function onRendered(node: Node, priority: number, handler: EventHandler) {
+    return register(node, priority, 'rendered', handler);
+}
+
+function createLifecycleEventHandlers(priority: number): LifecycleEventHandlers {
+    return {
+        priority,
+        mounted: new Set(),
+        ready: new Set(),
+        rendered: new Set(),
+        unmounted: new Set(),
+    };
+}
+
+function mergeEventHandlers(
+    handlers: LifecycleEventHandlers,
+    other: LifecycleEventHandlers,
+    events: EventName[],
+) {
+    for (const event of events) {
+        handlers[event] = handlers[event].union(other[event]);
+    }
+}
+
+function mergeEventHandlersGroupedByPriority(
+    handlersList: LifecycleEventHandlers[],
+    handlers: LifecycleEventHandlers,
+    events: EventName[],
+) {
+    let existingHandlers = handlersList.find(handlers => handlers.priority === handlers.priority);
+    if (!existingHandlers) {
+        existingHandlers = createLifecycleEventHandlers(handlers.priority);
+        handlersList.push(existingHandlers);
+    }
+    mergeEventHandlers(existingHandlers, handlers, events);
+}
+
+function onDOMUpdated(mutations: MutationRecord[]) {
+    const handlersList: LifecycleEventHandlers[] = [];
+    for (const mutation of mutations) {
+        for (const addedNode of iterNodeList(mutation.addedNodes)) {
+            const handlers = nodeEventMap.get(addedNode);
+            if (handlers) {
+                mergeEventHandlersGroupedByPriority(
+                    handlersList,
+                    handlers,
+                    AddEvents,
                 );
             }
-        }, 0);
-        requestAnimationFrame(() => {
-            // can potentially handle onRender (before render) here!
-            void Promise.resolve().then(async () => {
-                for (const handlers of handlersList) {
-                    await Promise.all(
-                        [...handlers.rendered].map((handler): MaybePromise<void> => handler()),
-                    );
-                }
-            });
-        });
-    }
-
-    private register(
-        node: Node,
-        level: number,
-        event: EventName,
-        handler: EventHandler,
-    ): Registration {
-        let nodeHandlers = this.handlersMap.get(node);
-        if (!nodeHandlers) {
-            nodeHandlers = {
-                level,
-                mounted: new Set(),
-                ready: new Set(),
-                rendered: new Set(),
-                unmounted: new Set(),
-            };
-            this.handlersMap.set(node, nodeHandlers);
         }
-        nodeHandlers[event].add(handler);
-
-        return {
-            unregister: () => nodeHandlers[event].delete(handler),
-        };
+        for (const removedNode of iterNodeList(mutation.removedNodes)) {
+            const handlers = nodeEventMap.get(removedNode);
+            if (handlers) {
+                mergeEventHandlersGroupedByPriority(
+                    handlersList,
+                    handlers,
+                    RemoveEvents,
+                );
+            }
+        }
     }
+    handlersList.sort(x => x.priority);
+    void dispatchEvents(handlersList);
+}
 
-    public onMounted(node: Node, level: number, handler: EventHandler) {
-        return this.register(node, level, 'mounted', handler);
+async function dispatchEvents(handlersList: LifecycleEventHandlers[]) {
+    for (const handlers of handlersList) {
+        await Promise.all(
+            [...handlers.mounted, ...handlers.unmounted]
+                .map((handler): MaybePromise<void> => handler()),
+        );
     }
-
-    public onUnmounted(node: Node, level: number, handler: EventHandler) {
-        return this.register(node, level, 'unmounted', handler);
-    }
-
-    public onReady(node: Node, level: number, handler: EventHandler) {
-        return this.register(node, level, 'ready', handler);
-    }
-
-    public onRendered(node: Node, level: number, handler: EventHandler) {
-        return this.register(node, level, 'rendered', handler);
-    }
+    setTimeout(async () => {
+        for (const handlers of handlersList) {
+            await Promise.all(
+                [...handlers.ready].map((handler): MaybePromise<void> => handler()),
+            );
+        }
+    }, 0);
+    requestAnimationFrame(() => {
+        // can potentially handle onRender (before render) here!
+        void Promise.resolve().then(async () => {
+            for (const handlers of handlersList) {
+                await Promise.all(
+                    [...handlers.rendered].map((handler): MaybePromise<void> => handler()),
+                );
+            }
+        });
+    });
 }
 
 function* iterNodeDescendants(node: Node) {
@@ -152,3 +177,14 @@ function* iterNodeList(nodes: NodeList) {
         }
     }
 }
+
+export const LifecycleEventManager = {
+    initialize,
+    register,
+    registerIndirect,
+    onMounted,
+    onUnmounted,
+    onReady,
+    onRendered,
+    createLifecycleEventHandlers,
+};

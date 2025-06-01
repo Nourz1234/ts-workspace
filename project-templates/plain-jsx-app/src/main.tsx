@@ -6,7 +6,7 @@ import { AsyncComponent } from './components/AsyncComponent';
 import { Counter, type CounterRefType } from './components/Counter';
 import { Fragments } from './components/Fragments';
 import { Input } from './components/Input';
-import { LifeTimeComponent } from './components/LifeTimeComponent';
+import { LifecycleComponent } from './components/LifecycleComponent';
 import typescriptLogo from './typescript.svg';
 
 const App: FunctionalComponent = () => {
@@ -14,7 +14,7 @@ const App: FunctionalComponent = () => {
     const counter = createObservable<CounterRefType | null>(null);
 
     function toggleDynamicCompetent() {
-        dynamicComponent.value = dynamicComponent.value ? null : <LifeTimeComponent />;
+        dynamicComponent.value = dynamicComponent.value ? null : <LifecycleComponent />;
         counter.value?.increment();
     }
 
