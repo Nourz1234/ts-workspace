@@ -3,9 +3,15 @@ import type { EventHandler } from './types';
 
 type EventName = 'mounted' | 'unmounted' | 'ready' | 'rendered';
 type EventHandlerMap = Record<EventName, Set<EventHandler>>;
+
 export type LifecycleEventHandlers = {
     priority: number;
 } & EventHandlerMap;
+
+export type TargetEventHandlers = {
+    target: WeakRef<object> | null;
+    mounts: number;
+} & LifecycleEventHandlers;
 
 export interface Registration {
     unregister: Action;
@@ -13,7 +19,7 @@ export interface Registration {
 
 const AddEvents: EventName[] = ['mounted', 'ready', 'rendered'];
 const RemoveEvents: EventName[] = ['unmounted'];
-const nodeEventMap = new WeakMap<Node, LifecycleEventHandlers>();
+const nodeEventMap = new WeakMap<Node, TargetEventHandlers>();
 
 const observer = new MutationObserver(onDOMUpdated);
 let isInitialized = false;
@@ -28,13 +34,14 @@ function initialize() {
 
 function register(
     node: Node,
+    target: object,
     priority: number,
     event: EventName,
     handler: EventHandler,
 ): Registration {
     let handlers = nodeEventMap.get(node);
     if (!handlers) {
-        handlers = createLifecycleEventHandlers(priority);
+        handlers = createTargetEventHandlers(target, priority);
         nodeEventMap.set(node, handlers);
     }
     handlers[event].add(handler);
@@ -44,10 +51,10 @@ function register(
     };
 }
 
-function registerIndirect(node: Node, handlers: LifecycleEventHandlers) {
+function registerIndirect(node: Node, target: object, handlers: LifecycleEventHandlers) {
     let existingHandlers = nodeEventMap.get(node);
     if (!existingHandlers) {
-        existingHandlers = createLifecycleEventHandlers(handlers.priority);
+        existingHandlers = createTargetEventHandlers(target, handlers.priority);
         nodeEventMap.set(node, existingHandlers);
     }
     mergeEventHandlers(existingHandlers, handlers, [
@@ -58,20 +65,20 @@ function registerIndirect(node: Node, handlers: LifecycleEventHandlers) {
     ]);
 }
 
-function onMounted(node: Node, priority: number, handler: EventHandler) {
-    return register(node, priority, 'mounted', handler);
+function onMounted(node: Node, target: object, priority: number, handler: EventHandler) {
+    return register(node, target, priority, 'mounted', handler);
 }
 
-function onUnmounted(node: Node, priority: number, handler: EventHandler) {
-    return register(node, priority, 'unmounted', handler);
+function onUnmounted(node: Node, target: object, priority: number, handler: EventHandler) {
+    return register(node, target, priority, 'unmounted', handler);
 }
 
-function onReady(node: Node, priority: number, handler: EventHandler) {
-    return register(node, priority, 'ready', handler);
+function onReady(node: Node, target: object, priority: number, handler: EventHandler) {
+    return register(node, target, priority, 'ready', handler);
 }
 
-function onRendered(node: Node, priority: number, handler: EventHandler) {
-    return register(node, priority, 'rendered', handler);
+function onRendered(node: Node, target: object, priority: number, handler: EventHandler) {
+    return register(node, target, priority, 'rendered', handler);
 }
 
 function createLifecycleEventHandlers(priority: number): LifecycleEventHandlers {
@@ -81,6 +88,15 @@ function createLifecycleEventHandlers(priority: number): LifecycleEventHandlers 
         ready: new Set(),
         rendered: new Set(),
         unmounted: new Set(),
+    };
+}
+
+function createTargetEventHandlers(target: object, priority: number): TargetEventHandlers {
+    const handlers = createLifecycleEventHandlers(priority);
+    return {
+        target: new WeakRef(target),
+        mounts: 0,
+        ...handlers,
     };
 }
 
@@ -112,23 +128,33 @@ function onDOMUpdated(mutations: MutationRecord[]) {
     for (const mutation of mutations) {
         for (const addedNode of iterNodeList(mutation.addedNodes)) {
             const handlers = nodeEventMap.get(addedNode);
-            if (handlers) {
-                mergeEventHandlersGroupedByPriority(
-                    handlersList,
-                    handlers,
-                    AddEvents,
-                );
+            if (!handlers) {
+                continue;
             }
+            if (handlers.mounts === 0) {
+                continue;
+            }
+            ++handlers.mounts;
+            mergeEventHandlersGroupedByPriority(
+                handlersList,
+                handlers,
+                AddEvents,
+            );
         }
         for (const removedNode of iterNodeList(mutation.removedNodes)) {
             const handlers = nodeEventMap.get(removedNode);
-            if (handlers) {
-                mergeEventHandlersGroupedByPriority(
-                    handlersList,
-                    handlers,
-                    RemoveEvents,
-                );
+            if (!handlers) {
+                continue;
             }
+            --handlers.mounts;
+            if (handlers.mounts !== 0) {
+                continue;
+            }
+            mergeEventHandlersGroupedByPriority(
+                handlersList,
+                handlers,
+                RemoveEvents,
+            );
         }
     }
     handlersList.sort(x => x.priority);
@@ -178,7 +204,7 @@ function* iterNodeList(nodes: NodeList) {
     }
 }
 
-export const LifecycleEventManager = {
+export const LifecycleEventsManager = {
     initialize,
     register,
     registerIndirect,

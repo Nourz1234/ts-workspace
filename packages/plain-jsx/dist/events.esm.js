@@ -10,10 +10,10 @@ function initialize() {
     isInitialized = true;
     observer.observe(document.body, { childList: true, subtree: true });
 }
-function register(node, priority, event, handler) {
+function register(node, target, priority, event, handler) {
     let handlers = nodeEventMap.get(node);
     if (!handlers) {
-        handlers = createLifecycleEventHandlers(priority);
+        handlers = createTargetEventHandlers(target, priority);
         nodeEventMap.set(node, handlers);
     }
     handlers[event].add(handler);
@@ -21,10 +21,10 @@ function register(node, priority, event, handler) {
         unregister: () => handlers[event].delete(handler),
     };
 }
-function registerIndirect(node, handlers) {
+function registerIndirect(node, target, handlers) {
     let existingHandlers = nodeEventMap.get(node);
     if (!existingHandlers) {
-        existingHandlers = createLifecycleEventHandlers(handlers.priority);
+        existingHandlers = createTargetEventHandlers(target, handlers.priority);
         nodeEventMap.set(node, existingHandlers);
     }
     mergeEventHandlers(existingHandlers, handlers, [
@@ -34,17 +34,17 @@ function registerIndirect(node, handlers) {
         'rendered',
     ]);
 }
-function onMounted(node, priority, handler) {
-    return register(node, priority, 'mounted', handler);
+function onMounted(node, target, priority, handler) {
+    return register(node, target, priority, 'mounted', handler);
 }
-function onUnmounted(node, priority, handler) {
-    return register(node, priority, 'unmounted', handler);
+function onUnmounted(node, target, priority, handler) {
+    return register(node, target, priority, 'unmounted', handler);
 }
-function onReady(node, priority, handler) {
-    return register(node, priority, 'ready', handler);
+function onReady(node, target, priority, handler) {
+    return register(node, target, priority, 'ready', handler);
 }
-function onRendered(node, priority, handler) {
-    return register(node, priority, 'rendered', handler);
+function onRendered(node, target, priority, handler) {
+    return register(node, target, priority, 'rendered', handler);
 }
 function createLifecycleEventHandlers(priority) {
     return {
@@ -53,6 +53,14 @@ function createLifecycleEventHandlers(priority) {
         ready: new Set(),
         rendered: new Set(),
         unmounted: new Set(),
+    };
+}
+function createTargetEventHandlers(target, priority) {
+    const handlers = createLifecycleEventHandlers(priority);
+    return {
+        target: new WeakRef(target),
+        mounts: 0,
+        ...handlers,
     };
 }
 function mergeEventHandlers(handlers, other, events) {
@@ -73,15 +81,25 @@ function onDOMUpdated(mutations) {
     for (const mutation of mutations) {
         for (const addedNode of iterNodeList(mutation.addedNodes)) {
             const handlers = nodeEventMap.get(addedNode);
-            if (handlers) {
-                mergeEventHandlersGroupedByPriority(handlersList, handlers, AddEvents);
+            if (!handlers) {
+                continue;
             }
+            if (handlers.mounts === 0) {
+                continue;
+            }
+            ++handlers.mounts;
+            mergeEventHandlersGroupedByPriority(handlersList, handlers, AddEvents);
         }
         for (const removedNode of iterNodeList(mutation.removedNodes)) {
             const handlers = nodeEventMap.get(removedNode);
-            if (handlers) {
-                mergeEventHandlersGroupedByPriority(handlersList, handlers, RemoveEvents);
+            if (!handlers) {
+                continue;
             }
+            --handlers.mounts;
+            if (handlers.mounts !== 0) {
+                continue;
+            }
+            mergeEventHandlersGroupedByPriority(handlersList, handlers, RemoveEvents);
         }
     }
     handlersList.sort(x => x.priority);
@@ -120,7 +138,7 @@ function* iterNodeList(nodes) {
         }
     }
 }
-const LifecycleEventManager = {
+const LifecycleEventsManager = {
     initialize,
     register,
     registerIndirect,
@@ -131,4 +149,4 @@ const LifecycleEventManager = {
     createLifecycleEventHandlers,
 };
 
-export { LifecycleEventManager };
+export { LifecycleEventsManager };

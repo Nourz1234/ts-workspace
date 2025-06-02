@@ -1,7 +1,7 @@
 import type { MaybePromise } from '@lib/utils';
 import { hasKey } from '@lib/utils';
 import type { LifecycleEventHandlers } from './events';
-import { LifecycleEventManager } from './events';
+import { LifecycleEventsManager } from './events';
 import type { Subscription } from './observable';
 import { Observable } from './observable';
 import { ReactiveNode } from './reactive';
@@ -68,14 +68,15 @@ export async function render(
     element: VNode,
     handlers?: { onMounted: EventHandler },
 ) {
-    LifecycleEventManager.initialize();
+    LifecycleEventsManager.initialize();
     const node = await renderVNode(element, 1);
     if (node === null) {
         return;
     }
 
+    // NEEDS FIXING!!!!!!!!!!!!!!!!!!!!!!
     if (handlers) {
-        LifecycleEventManager.onMounted(node, 0, handlers.onMounted);
+        LifecycleEventsManager.onMounted(node, node, 0, handlers.onMounted);
     }
 
     root.appendChild(node);
@@ -84,7 +85,7 @@ export async function render(
 async function renderVNode(
     element: VNode,
     level: number,
-    parentComponentEventHandlers?: LifecycleEventHandlers,
+    parentComponent?: InternalComponent,
 ): Promise<Node | null> {
     if (element === undefined || element === null || typeof element === 'boolean') {
         return null;
@@ -105,12 +106,10 @@ async function renderVNode(
     const renderChildren = async (
         node: Element | DocumentFragment,
         children: VNode[],
-        parentComponentEventHandlers?: LifecycleEventHandlers,
+        parentComponent?: InternalComponent,
     ) => {
         const childNodes = await Promise.all(
-            children.flat().map(async child =>
-                renderVNode(child, level + 1, parentComponentEventHandlers)
-            ),
+            children.flat().map(async child => renderVNode(child, level + 1, parentComponent)),
         );
         node.append(...childNodes.filter(node => node !== null));
     };
@@ -121,7 +120,7 @@ async function renderVNode(
     }
     else if (type === Fragment) {
         const fragment = document.createDocumentFragment();
-        await renderChildren(fragment, children, parentComponentEventHandlers);
+        await renderChildren(fragment, children, parentComponent);
         return fragment;
     }
     else {
@@ -137,23 +136,32 @@ async function renderVNode(
             const elementRef = props['ref'];
             delete props['ref'];
 
-            LifecycleEventManager.onMounted(domElement, level, () => {
+            LifecycleEventsManager.onMounted(domElement, domElement, level, () => {
                 elementRef.value = ref.deref();
             });
-            LifecycleEventManager.onUnmounted(domElement, level, () => {
+            LifecycleEventsManager.onUnmounted(domElement, domElement, level, () => {
                 elementRef.value = null;
             });
         }
 
         const { subscribeProps, unsubscribeProps } = setProps(domElement, props);
-        LifecycleEventManager.onMounted(domElement, level, subscribeProps);
-        LifecycleEventManager.onUnmounted(domElement, level, unsubscribeProps);
-        if (parentComponentEventHandlers) {
-            LifecycleEventManager.registerIndirect(domElement, parentComponentEventHandlers);
+        LifecycleEventsManager.onMounted(domElement, domElement, level, subscribeProps);
+        LifecycleEventsManager.onUnmounted(domElement, domElement, level, unsubscribeProps);
+        if (parentComponent) {
+            LifecycleEventsManager.registerIndirect(
+                domElement,
+                parentComponent,
+                parentComponent.lcEventHandlers,
+            );
         }
         await renderChildren(domElement, children);
         return domElement;
     }
+}
+
+interface InternalComponent {
+    ref: WeakRef<object> | null;
+    lcEventHandlers: LifecycleEventHandlers;
 }
 
 async function renderFunctionalComponent(
@@ -164,7 +172,7 @@ async function renderFunctionalComponent(
 ): Promise<Node | null> {
     const setupHandlers: SetupHandler[] = [];
     const errorCapturedHandlers: ErrorCapturedHandler[] = [];
-    const lcEventHandlers = LifecycleEventManager.createLifecycleEventHandlers(level);
+    const lcEventHandlers = LifecycleEventsManager.createLifecycleEventHandlers(level);
 
     const componentEvents: ComponentEvents = {
         onSetup: (handler: SetupHandler) => setupHandlers.push(handler),
@@ -175,34 +183,19 @@ async function renderFunctionalComponent(
         onRendered: (handler: EventHandler) => lcEventHandlers.rendered.add(handler),
     };
 
-    let mountedChildren = 0;
-    const requireOnce = (handlers: Set<EventHandler>): EventHandler => {
-        return async () => {
-            if (mountedChildren === 0) {
-                await Promise.all([...handlers].map((handler): MaybePromise<void> => handler()));
-            }
-            ++mountedChildren;
-        };
+    const component: InternalComponent = {
+        ref: null,
+        lcEventHandlers,
     };
-    const requireAll = (handlers: Set<EventHandler>): EventHandler => {
-        return async () => {
-            --mountedChildren;
-            if (mountedChildren === 0) {
-                await Promise.all([...handlers].map((handler): MaybePromise<void> => handler()));
-            }
-        };
-    };
-
-    let ref: WeakRef<object> | null = null;
     const defineRef = (_ref: object) => {
-        ref = new WeakRef(_ref);
+        component.ref = new WeakRef(_ref);
     };
 
     if (props['ref'] instanceof Observable) {
         const componentRef = props['ref'];
 
         componentEvents.onMounted(() => {
-            componentRef.value = ref?.deref();
+            componentRef.value = component.ref?.deref();
         });
         componentEvents.onUnmounted(() => {
             componentRef.value = null;
@@ -213,11 +206,7 @@ async function renderFunctionalComponent(
     try {
         const vNode = type({ ...props, children }, componentEvents, { defineRef });
         await Promise.all(setupHandlers.map((setupHandler): MaybePromise<void> => setupHandler()));
-        lcEventHandlers.mounted = new Set([requireOnce(lcEventHandlers.mounted)]);
-        lcEventHandlers.unmounted = new Set([requireAll(lcEventHandlers.unmounted)]);
-        lcEventHandlers.ready = new Set([requireOnce(lcEventHandlers.ready)]);
-        lcEventHandlers.rendered = new Set([requireOnce(lcEventHandlers.rendered)]);
-        node = await renderVNode(vNode, level + 1, lcEventHandlers);
+        node = await renderVNode(vNode, level + 1, component);
     }
     catch (error) {
         const handled = errorCapturedHandlers.some(handler => handler(error) === false);
