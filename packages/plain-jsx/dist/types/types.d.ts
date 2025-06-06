@@ -5,17 +5,22 @@ export type PropsType = Record<string, unknown>;
 export interface VNodeElement {
     type: string | FunctionalComponent;
     props: PropsType;
-    children: VNode[];
-    isDev: boolean;
+    children: VNode | VNode[] | null;
 }
-export type VNode = Observable<VNode> | VNodeElement | string | number | boolean | null | undefined;
+export type VNode = Observable<VNode> | Observable<VNode[]> | Observable<VNode | VNode[]> | VNodeElement | string | number | boolean | null | undefined;
 export type VNodeChildren = VNode | VNode[];
-export type FunctionalComponent<TProps = PropsType, TRef = never> = (props: TProps & CustomProps & RefProp<TRef>, events: ComponentEvents, helpers: Helpers<TRef>) => VNode;
-export type RefType<T extends FunctionalComponent<never, unknown>> = T extends FunctionalComponent<never, infer TRef> ? TRef : never;
+export type FunctionalComponent = (props: PropsType, events: ComponentEvents, helpers: Helpers<unknown>) => VNode;
+/** Represents a rendered VNode */
+export type RNode = ChildNode | ChildNode[] | null;
+export interface Component {
+    id: number;
+    mountedChildCount: number;
+    ref?: unknown;
+}
 export type SetupHandler = () => Promise<void>;
 export type EventHandler = () => MaybePromise<void>;
 export type ErrorCapturedHandler = (error: unknown) => boolean | void;
-interface Helpers<TRef> {
+export interface Helpers<TRef> {
     /**
      * A helper function to define the component's ref interface.
      * @example
@@ -90,17 +95,14 @@ export interface ComponentEvents {
      */
     onErrorCaptured: (handler: ErrorCapturedHandler) => void;
 }
-interface CustomProps {
-    children?: VNodeChildren;
-}
-interface RefProp<T> {
-    ref?: Observable<T | null>;
-}
 type CommonProps<T extends Element> = (T extends ElementCSSInlineStyle ? {
     style?: CSS;
 } : object) & (T extends HTMLOrSVGElement ? {
     dataset?: DOMStringMap;
-} : object) & CustomProps & RefProp<T>;
+} : object) & {
+    ref?: Observable<T | null>;
+    children?: VNodeChildren;
+};
 type SettableProps<T extends Element> = Omit<T, keyof (ReadonlyProps<T> & MethodsOf<T> & CommonProps<T> & GlobalEventHandlers)>;
 type TypedEvent<TElement extends Element, TEvent extends Event = Event> = Omit<TEvent, 'currentTarget'> & {
     currentTarget: TElement;

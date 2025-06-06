@@ -1,33 +1,41 @@
-import { createObservable, type FunctionalComponent } from '@lib/plain-jsx';
+import { createObservable, type FunctionalComponent, type ParentComponent } from '@lib/plain-jsx';
 
-const LifecycleComponent: FunctionalComponent = (
-    _props,
+interface LifecycleComponentProps extends ParentComponent {
+    name?: string;
+}
+
+let count = 0;
+
+const LifecycleComponent: FunctionalComponent<LifecycleComponentProps> = (
+    { name, children },
     { onMounted, onUnmounted, onReady, onRendered },
 ) => {
-    const button = createObservable<HTMLButtonElement | null>(null);
-    const title = createObservable<string>("LifeTimeComponent")
+    name = name ?? `LifecycleComponent ${++count}`;
+
+    const span = createObservable<HTMLButtonElement | null>(null);
+    const title = createObservable<string>(name);
     const reg = new FinalizationRegistry((heldValue) => {
         console.info(`${heldValue} has been garbage collected`);
     });
 
     onMounted(() => {
-        console.info('LifeTimeComponent: mounted!', button.value?.toString());
-        reg.register(button.value!, 'LifeTimeComponent');
+        console.info(`${name}: mounted!`, span.value?.tagName);
+        reg.register(span.value!, name);
     });
 
     onUnmounted(() => {
-        console.info('LifeTimeComponent: unmounted!', button.value);
+        console.info(`${name}: unmounted!`, span.value?.tagName);
     });
 
     onReady(() => {
-        console.info('LifeTimeComponent: ready!');
+        console.info(`${name}: ready!`);
     });
 
     onRendered(() => {
-        console.info('LifeTimeComponent: rendered!');
+        console.info(`${name}: rendered!`);
     });
 
-    return <button ref={button} title={title}>LifeTimeComponent</button>;
+    return <span ref={span} title={title}>{children}</span>;
 };
 
 export { LifecycleComponent };

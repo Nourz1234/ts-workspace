@@ -1,4 +1,5 @@
 import type { Action, MaybePromise } from '@lib/utils';
+import type { FunctionalComponent } from '.';
 export interface Subscription {
     unsubscribe: Action;
 }
@@ -18,3 +19,4 @@ export declare class Observable<T> {
     private unsubscribe;
 }
 export declare function createObservable<T>(initialValue: T): Observable<T>;
+export declare function createRef<T extends Element | FunctionalComponent<never, any>, U = T extends Element ? T : T extends FunctionalComponent<never, infer TRef> ? TRef : never>(): Observable<U | null>;

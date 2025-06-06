@@ -1,6 +1,7 @@
 const AddEvents = ['mounted', 'ready', 'rendered'];
 const RemoveEvents = ['unmounted'];
-const nodeEventMap = new WeakMap();
+const targetMap = new WeakMap();
+const targetParentMap = new WeakMap();
 const observer = new MutationObserver(onDOMUpdated);
 let isInitialized = false;
 function initialize() {
@@ -10,41 +11,31 @@ function initialize() {
     isInitialized = true;
     observer.observe(document.body, { childList: true, subtree: true });
 }
-function register(node, target, priority, event, handler) {
-    let handlers = nodeEventMap.get(node);
+function register(target, priority, event, handler) {
+    let handlers = targetMap.get(target);
     if (!handlers) {
-        handlers = createTargetEventHandlers(target, priority);
-        nodeEventMap.set(node, handlers);
+        handlers = createLifecycleEventHandlers(priority);
+        targetMap.set(target, handlers);
     }
     handlers[event].add(handler);
     return {
         unregister: () => handlers[event].delete(handler),
     };
 }
-function registerIndirect(node, target, handlers) {
-    let existingHandlers = nodeEventMap.get(node);
-    if (!existingHandlers) {
-        existingHandlers = createTargetEventHandlers(target, handlers.priority);
-        nodeEventMap.set(node, existingHandlers);
-    }
-    mergeEventHandlers(existingHandlers, handlers, [
-        'mounted',
-        'unmounted',
-        'ready',
-        'rendered',
-    ]);
+function setLogicalParent(target, component) {
+    targetParentMap.set(target, component);
 }
-function onMounted(node, target, priority, handler) {
-    return register(node, target, priority, 'mounted', handler);
+function onMounted(target, priority, handler) {
+    return register(target, priority, 'mounted', handler);
 }
-function onUnmounted(node, target, priority, handler) {
-    return register(node, target, priority, 'unmounted', handler);
+function onUnmounted(target, priority, handler) {
+    return register(target, priority, 'unmounted', handler);
 }
-function onReady(node, target, priority, handler) {
-    return register(node, target, priority, 'ready', handler);
+function onReady(target, priority, handler) {
+    return register(target, priority, 'ready', handler);
 }
-function onRendered(node, target, priority, handler) {
-    return register(node, target, priority, 'rendered', handler);
+function onRendered(target, priority, handler) {
+    return register(target, priority, 'rendered', handler);
 }
 function createLifecycleEventHandlers(priority) {
     return {
@@ -55,21 +46,13 @@ function createLifecycleEventHandlers(priority) {
         unmounted: new Set(),
     };
 }
-function createTargetEventHandlers(target, priority) {
-    const handlers = createLifecycleEventHandlers(priority);
-    return {
-        target: new WeakRef(target),
-        mounts: 0,
-        ...handlers,
-    };
-}
 function mergeEventHandlers(handlers, other, events) {
     for (const event of events) {
         handlers[event] = handlers[event].union(other[event]);
     }
 }
 function mergeEventHandlersGroupedByPriority(handlersList, handlers, events) {
-    let existingHandlers = handlersList.find(handlers => handlers.priority === handlers.priority);
+    let existingHandlers = handlersList.find(existingHandlers => existingHandlers.priority === handlers.priority);
     if (!existingHandlers) {
         existingHandlers = createLifecycleEventHandlers(handlers.priority);
         handlersList.push(existingHandlers);
@@ -77,49 +60,75 @@ function mergeEventHandlersGroupedByPriority(handlersList, handlers, events) {
     mergeEventHandlers(existingHandlers, handlers, events);
 }
 function onDOMUpdated(mutations) {
-    const handlersList = [];
+    const nodesMap = new Map();
+    const getMeta = (node) => {
+        let meta = nodesMap.get(node);
+        if (!meta) {
+            meta = { mountCount: 0 };
+            nodesMap.set(node, meta);
+        }
+        return meta;
+    };
     for (const mutation of mutations) {
         for (const addedNode of iterNodeList(mutation.addedNodes)) {
-            const handlers = nodeEventMap.get(addedNode);
-            if (!handlers) {
-                continue;
-            }
-            if (handlers.mounts === 0) {
-                continue;
-            }
-            ++handlers.mounts;
-            mergeEventHandlersGroupedByPriority(handlersList, handlers, AddEvents);
+            const meta = getMeta(addedNode);
+            meta.mountCount++;
         }
         for (const removedNode of iterNodeList(mutation.removedNodes)) {
-            const handlers = nodeEventMap.get(removedNode);
-            if (!handlers) {
-                continue;
-            }
-            --handlers.mounts;
-            if (handlers.mounts !== 0) {
-                continue;
-            }
-            mergeEventHandlersGroupedByPriority(handlersList, handlers, RemoveEvents);
+            const meta = getMeta(removedNode);
+            meta.mountCount--;
         }
     }
-    handlersList.sort(x => x.priority);
+    const handlersList = [];
+    const handleEventTarget = (target, events) => {
+        const handlers = targetMap.get(target);
+        if (!handlers) {
+            return;
+        }
+        mergeEventHandlersGroupedByPriority(handlersList, handlers, events);
+    };
+    for (const [node, meta] of nodesMap.entries()) {
+        let events;
+        let handleAtCount;
+        if (meta.mountCount > 0) {
+            events = AddEvents;
+            handleAtCount = 1;
+        }
+        else if (meta.mountCount < 0) {
+            events = RemoveEvents;
+            handleAtCount = 0;
+        }
+        else {
+            continue;
+        }
+        let parent = targetParentMap.get(node);
+        while (parent) {
+            parent.mountedChildCount += meta.mountCount;
+            if (parent.mountedChildCount === handleAtCount) {
+                handleEventTarget(parent, events);
+            }
+            parent = targetParentMap.get(parent);
+        }
+        handleEventTarget(node, events);
+    }
+    handlersList.sort((a, b) => b.priority - a.priority);
     void dispatchEvents(handlersList);
 }
 async function dispatchEvents(handlersList) {
     for (const handlers of handlersList) {
-        await Promise.all([...handlers.mounted, ...handlers.unmounted]
-            .map((handler) => handler()));
+        await Promise.allSettled([...handlers.mounted, ...handlers.unmounted]
+            .map((handler) => handler())).catch(console.error);
     }
     setTimeout(async () => {
         for (const handlers of handlersList) {
-            await Promise.all([...handlers.ready].map((handler) => handler()));
+            await Promise.allSettled([...handlers.ready].map((handler) => handler()));
         }
     }, 0);
     requestAnimationFrame(() => {
         // can potentially handle onRender (before render) here!
         void Promise.resolve().then(async () => {
             for (const handlers of handlersList) {
-                await Promise.all([...handlers.rendered].map((handler) => handler()));
+                await Promise.allSettled([...handlers.rendered].map((handler) => handler()));
             }
         });
     });
@@ -141,7 +150,7 @@ function* iterNodeList(nodes) {
 const LifecycleEventsManager = {
     initialize,
     register,
-    registerIndirect,
+    setLogicalParent,
     onMounted,
     onUnmounted,
     onReady,

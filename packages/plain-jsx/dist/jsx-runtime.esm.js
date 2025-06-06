@@ -1,1 +1,1 @@
-export { Fragment, jsx, jsxDEV, jsx as jsxs } from './core.esm.js';
+export { Fragment, jsx, jsx as jsxDEV, jsx as jsxs } from './core.esm.js';

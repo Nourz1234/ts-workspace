@@ -3,7 +3,8 @@ var PlainJSX = (function (exports, utils) {
 
     const AddEvents = ['mounted', 'ready', 'rendered'];
     const RemoveEvents = ['unmounted'];
-    const nodeEventMap = new WeakMap();
+    const targetMap = new WeakMap();
+    const targetParentMap = new WeakMap();
     const observer = new MutationObserver(onDOMUpdated);
     let isInitialized = false;
     function initialize() {
@@ -13,41 +14,31 @@ var PlainJSX = (function (exports, utils) {
         isInitialized = true;
         observer.observe(document.body, { childList: true, subtree: true });
     }
-    function register(node, target, priority, event, handler) {
-        let handlers = nodeEventMap.get(node);
+    function register(target, priority, event, handler) {
+        let handlers = targetMap.get(target);
         if (!handlers) {
-            handlers = createTargetEventHandlers(target, priority);
-            nodeEventMap.set(node, handlers);
+            handlers = createLifecycleEventHandlers(priority);
+            targetMap.set(target, handlers);
         }
         handlers[event].add(handler);
         return {
             unregister: () => handlers[event].delete(handler),
         };
     }
-    function registerIndirect(node, target, handlers) {
-        let existingHandlers = nodeEventMap.get(node);
-        if (!existingHandlers) {
-            existingHandlers = createTargetEventHandlers(target, handlers.priority);
-            nodeEventMap.set(node, existingHandlers);
-        }
-        mergeEventHandlers(existingHandlers, handlers, [
-            'mounted',
-            'unmounted',
-            'ready',
-            'rendered',
-        ]);
+    function setLogicalParent(target, component) {
+        targetParentMap.set(target, component);
     }
-    function onMounted(node, target, priority, handler) {
-        return register(node, target, priority, 'mounted', handler);
+    function onMounted(target, priority, handler) {
+        return register(target, priority, 'mounted', handler);
     }
-    function onUnmounted(node, target, priority, handler) {
-        return register(node, target, priority, 'unmounted', handler);
+    function onUnmounted(target, priority, handler) {
+        return register(target, priority, 'unmounted', handler);
     }
-    function onReady(node, target, priority, handler) {
-        return register(node, target, priority, 'ready', handler);
+    function onReady(target, priority, handler) {
+        return register(target, priority, 'ready', handler);
     }
-    function onRendered(node, target, priority, handler) {
-        return register(node, target, priority, 'rendered', handler);
+    function onRendered(target, priority, handler) {
+        return register(target, priority, 'rendered', handler);
     }
     function createLifecycleEventHandlers(priority) {
         return {
@@ -58,21 +49,13 @@ var PlainJSX = (function (exports, utils) {
             unmounted: new Set(),
         };
     }
-    function createTargetEventHandlers(target, priority) {
-        const handlers = createLifecycleEventHandlers(priority);
-        return {
-            target: new WeakRef(target),
-            mounts: 0,
-            ...handlers,
-        };
-    }
     function mergeEventHandlers(handlers, other, events) {
         for (const event of events) {
             handlers[event] = handlers[event].union(other[event]);
         }
     }
     function mergeEventHandlersGroupedByPriority(handlersList, handlers, events) {
-        let existingHandlers = handlersList.find(handlers => handlers.priority === handlers.priority);
+        let existingHandlers = handlersList.find(existingHandlers => existingHandlers.priority === handlers.priority);
         if (!existingHandlers) {
             existingHandlers = createLifecycleEventHandlers(handlers.priority);
             handlersList.push(existingHandlers);
@@ -80,49 +63,75 @@ var PlainJSX = (function (exports, utils) {
         mergeEventHandlers(existingHandlers, handlers, events);
     }
     function onDOMUpdated(mutations) {
-        const handlersList = [];
+        const nodesMap = new Map();
+        const getMeta = (node) => {
+            let meta = nodesMap.get(node);
+            if (!meta) {
+                meta = { mountCount: 0 };
+                nodesMap.set(node, meta);
+            }
+            return meta;
+        };
         for (const mutation of mutations) {
             for (const addedNode of iterNodeList(mutation.addedNodes)) {
-                const handlers = nodeEventMap.get(addedNode);
-                if (!handlers) {
-                    continue;
-                }
-                if (handlers.mounts === 0) {
-                    continue;
-                }
-                ++handlers.mounts;
-                mergeEventHandlersGroupedByPriority(handlersList, handlers, AddEvents);
+                const meta = getMeta(addedNode);
+                meta.mountCount++;
             }
             for (const removedNode of iterNodeList(mutation.removedNodes)) {
-                const handlers = nodeEventMap.get(removedNode);
-                if (!handlers) {
-                    continue;
-                }
-                --handlers.mounts;
-                if (handlers.mounts !== 0) {
-                    continue;
-                }
-                mergeEventHandlersGroupedByPriority(handlersList, handlers, RemoveEvents);
+                const meta = getMeta(removedNode);
+                meta.mountCount--;
             }
         }
-        handlersList.sort(x => x.priority);
+        const handlersList = [];
+        const handleEventTarget = (target, events) => {
+            const handlers = targetMap.get(target);
+            if (!handlers) {
+                return;
+            }
+            mergeEventHandlersGroupedByPriority(handlersList, handlers, events);
+        };
+        for (const [node, meta] of nodesMap.entries()) {
+            let events;
+            let handleAtCount;
+            if (meta.mountCount > 0) {
+                events = AddEvents;
+                handleAtCount = 1;
+            }
+            else if (meta.mountCount < 0) {
+                events = RemoveEvents;
+                handleAtCount = 0;
+            }
+            else {
+                continue;
+            }
+            let parent = targetParentMap.get(node);
+            while (parent) {
+                parent.mountedChildCount += meta.mountCount;
+                if (parent.mountedChildCount === handleAtCount) {
+                    handleEventTarget(parent, events);
+                }
+                parent = targetParentMap.get(parent);
+            }
+            handleEventTarget(node, events);
+        }
+        handlersList.sort((a, b) => b.priority - a.priority);
         void dispatchEvents(handlersList);
     }
     async function dispatchEvents(handlersList) {
         for (const handlers of handlersList) {
-            await Promise.all([...handlers.mounted, ...handlers.unmounted]
-                .map((handler) => handler()));
+            await Promise.allSettled([...handlers.mounted, ...handlers.unmounted]
+                .map((handler) => handler())).catch(console.error);
         }
         setTimeout(async () => {
             for (const handlers of handlersList) {
-                await Promise.all([...handlers.ready].map((handler) => handler()));
+                await Promise.allSettled([...handlers.ready].map((handler) => handler()));
             }
         }, 0);
         requestAnimationFrame(() => {
             // can potentially handle onRender (before render) here!
             void Promise.resolve().then(async () => {
                 for (const handlers of handlersList) {
-                    await Promise.all([...handlers.rendered].map((handler) => handler()));
+                    await Promise.allSettled([...handlers.rendered].map((handler) => handler()));
                 }
             });
         });
@@ -144,7 +153,7 @@ var PlainJSX = (function (exports, utils) {
     const LifecycleEventsManager = {
         initialize,
         register,
-        registerIndirect,
+        setLogicalParent,
         onMounted,
         onUnmounted,
         onReady,
@@ -195,109 +204,180 @@ var PlainJSX = (function (exports, utils) {
     function createObservable(initialValue) {
         return new Observable(initialValue);
     }
+    function createRef() {
+        return new Observable(null);
+    }
+
+    class Sentinel {
+    }
+    const _Sentinel = new Sentinel();
 
     class ReactiveNode {
-        static resolveNode(node) {
-            return node instanceof DocumentFragment
-                ? Array.from(node.childNodes)
-                : [node];
+        placeholder = document.createComment('');
+        children;
+        constructor() {
+            this.children = [this.placeholder];
         }
-        children = [document.createComment('')];
-        update(node) {
-            node ??= document.createComment('');
-            const children = ReactiveNode.resolveNode(node);
-            const firstChild = this.children[0];
-            const parentNode = firstChild.parentNode;
-            if (parentNode) {
-                const newChildren = Array.from(parentNode.childNodes);
-                newChildren.splice(newChildren.indexOf(firstChild), this.children.length, ...children);
-                parentNode.replaceChildren(...newChildren);
+        update(rNode) {
+            if (rNode === null || (Array.isArray(rNode) && rNode.length === 0)) {
+                rNode = this.placeholder;
             }
+            const children = Array.isArray(rNode) ? [...rNode] : [rNode];
+            this.children.slice(1).forEach(child => child.remove());
+            this.children[0].replaceWith(...children);
             this.children = children;
         }
         getRoot() {
-            const fragment = document.createDocumentFragment();
-            fragment.append(...this.children);
-            return fragment;
+            return this.children;
         }
     }
-    // another version utilizing Set.difference
-    // export class ReactiveNode {
-    //     private static resolveNode(node: Node): Set<Node> {
-    //         return node instanceof DocumentFragment
-    //             ? new Set(node.childNodes)
-    //             : new Set([node]);
-    //     }
-    //     private children = new Set<Node>([document.createComment('')]);
-    //     public update(node: Node | null) {
-    //         node ??= document.createComment('');
-    //         const children = ReactiveNode.resolveNode(node);
-    //         const firstChild = this.children.values().next().value!;
-    //         const parentNode = firstChild.parentNode;
-    //         if (parentNode) {
-    //             const existingChildren: Node[] = Array.from(parentNode.childNodes);
-    //             existingChildren.splice(existingChildren.indexOf(firstChild), 0, ...children);
-    //             const newChildren = new Set(existingChildren).difference(this.children);
-    //             parentNode.replaceChildren(...newChildren);
-    //         }
-    //         this.children = children;
-    //     }
-    //     public getRoot(): Node {
-    //         const fragment = document.createDocumentFragment();
-    //         fragment.append(...this.children);
-    //         return fragment;
-    //     }
-    // }
+    const Show = 'Show';
+    async function renderShow(props, children, renderVNodes) {
+        const { when, cache } = props;
+        if (when instanceof Observable === false) {
+            throw new Error("The 'when' prop on <Show> is required and must be an Observable.");
+        }
+        const childrenOrFn = children;
+        const getChildren = typeof childrenOrFn === 'function' ? childrenOrFn : () => childrenOrFn;
+        let childNodes = null;
+        const render = cache === false
+            ? async () => await renderVNodes(getChildren())
+            : async () => childNodes ??= await renderVNodes(getChildren());
+        const reactiveNode = new ReactiveNode();
+        if (when.value) {
+            reactiveNode.update(await render());
+        }
+        when.subscribe(async (value) => {
+            reactiveNode.update(value ? await render() : null);
+        });
+        return reactiveNode.getRoot();
+    }
+    function With(props) {
+        throw new Error('This component cannot be called directly — it must be used through the render function.');
+    }
+    async function renderWith(props, children, renderVNodes) {
+        const { value } = props;
+        if (value instanceof Observable === false) {
+            throw new Error("The 'value' prop on <With> is required and must be an Observable.");
+        }
+        if (typeof children !== 'function') {
+            throw new Error('The <With> component must have exactly one child — a function that maps the value.');
+        }
+        const mapFn = children;
+        const reactiveNode = new ReactiveNode();
+        reactiveNode.update(await renderVNodes(mapFn(value.value)));
+        value.subscribe(async (value) => {
+            reactiveNode.update(await renderVNodes(mapFn(value)));
+        });
+        return reactiveNode.getRoot();
+    }
+    function For(props) {
+        throw new Error('This component cannot be called directly — it must be used through the render function.');
+    }
+    async function renderFor(props, children, renderVNodes) {
+        const { of } = props;
+        if (of instanceof Observable === false) {
+            throw new Error("The 'of' prop on <For> is required and must be an Observable.");
+        }
+        if (typeof children !== 'function') {
+            throw new Error('The <For> component must have exactly one child — a function that maps each item.');
+        }
+        const mapFn = children;
+        let cachedValues = [];
+        const popCached = (value, index) => {
+            const valIndex = cachedValues.findIndex(([_value, _index]) => _index === index && _value === value);
+            if (valIndex === -1) {
+                return _Sentinel;
+            }
+            const vNode = cachedValues[valIndex][2];
+            cachedValues.splice(valIndex, 1);
+            return vNode;
+        };
+        const render = async (value, index) => {
+            let childNodes = _Sentinel;
+            if (cachedValues.length) {
+                childNodes = popCached(value, index);
+            }
+            return [
+                value,
+                index,
+                childNodes instanceof Sentinel ? await renderVNodes(mapFn(value, index)) : childNodes,
+            ];
+        };
+        const reactiveNode = new ReactiveNode();
+        cachedValues = await Promise.all(of.value.map(render));
+        reactiveNode.update(cachedValues.map(([, , vNode]) => vNode).flat());
+        of.subscribe(async (items) => {
+            cachedValues = await Promise.all(items.map(render));
+            reactiveNode.update(cachedValues.map(([, , vNode]) => vNode).flat());
+        });
+        return reactiveNode.getRoot();
+    }
 
     const XMLNamespaces = {
         'svg': 'http://www.w3.org/2000/svg',
     };
     const Fragment = 'Fragment';
-    function createVNode(type, props = {}, children = [], isDev = false) {
-        return { type, props, children, isDev };
+    /* built-in components that have special handling */
+    const BuiltinComponents = new Map([
+        [Show, renderShow],
+        [With, renderWith],
+        [For, renderFor],
+    ]);
+    function createVNode(type, props, children) {
+        return { type, props: props ?? {}, children };
     }
     function createElement(tag, props, ...children) {
         return createVNode(tag, props, children);
     }
-    async function render(root, element, handlers) {
+    async function render(root, vNode) {
         LifecycleEventsManager.initialize();
-        const node = await renderVNode(element, 1);
-        if (node === null) {
+        const rNode = await renderVNode(vNode, 1);
+        if (rNode === null) {
             return;
         }
-        // NEEDS FIXING!!!!!!!!!!!!!!!!!!!!!!
-        if (handlers) {
-            LifecycleEventsManager.onMounted(node, node, 0, handlers.onMounted);
+        if (Array.isArray(rNode)) {
+            root.append(...rNode);
         }
-        root.appendChild(node);
+        else {
+            root.appendChild(rNode);
+        }
     }
-    async function renderVNode(element, level, parentComponent) {
-        if (element === undefined || element === null || typeof element === 'boolean') {
+    async function renderVNode(vNode, level, parent) {
+        if (vNode === undefined || vNode === null || typeof vNode === 'boolean') {
             return null;
         }
-        else if (typeof element === 'string' || typeof element === 'number') {
-            return document.createTextNode(String(element));
+        else if (typeof vNode === 'string' || typeof vNode === 'number') {
+            return document.createTextNode(String(vNode));
         }
-        else if (element instanceof Observable) {
+        else if (vNode instanceof Observable) {
             const reactiveNode = new ReactiveNode();
-            reactiveNode.update(await renderVNode(element.value, level + 1));
-            element.subscribe(async (newElement) => {
-                reactiveNode.update(await renderVNode(newElement, level + 1));
-            });
+            reactiveNode.update(await renderVNodes(vNode.value, level, parent));
+            if (parent) {
+                let subscription = null;
+                LifecycleEventsManager.onMounted(parent, level, () => {
+                    subscription = vNode.subscribe(async (value) => {
+                        reactiveNode.update(await renderVNodes(value, level, parent));
+                    });
+                });
+                LifecycleEventsManager.onUnmounted(parent, level, () => {
+                    subscription?.unsubscribe();
+                    subscription = null;
+                });
+            }
             return reactiveNode.getRoot();
         }
-        const renderChildren = async (node, children, parentComponent) => {
-            const childNodes = await Promise.all(children.flat().map(async (child) => renderVNode(child, level + 1, parentComponent)));
-            node.append(...childNodes.filter(node => node !== null));
-        };
-        const { type, props, children } = element;
+        const { type, props, children } = vNode;
+        const renderBuiltin = BuiltinComponents.get(type);
+        if (renderBuiltin) {
+            return await renderBuiltin(props, children, async (vNodes) => renderVNodes(vNodes, level, parent));
+        }
+        /* general handling */
         if (typeof type === 'function') {
-            return await renderFunctionalComponent(type, props, children, level + 1);
+            return await renderFunctionalComponent(type, props, children, level + 1, parent);
         }
         else if (type === Fragment) {
-            const fragment = document.createDocumentFragment();
-            await renderChildren(fragment, children, parentComponent);
-            return fragment;
+            return await renderVNodes(children, level + 1, parent);
         }
         else {
             const hasNS = type.includes(':');
@@ -305,60 +385,65 @@ var PlainJSX = (function (exports, utils) {
                 ? document.createElementNS(...splitNamespace(type))
                 : document.createElement(type);
             // handle ref prop
-            const ref = new WeakRef(domElement);
             if (props['ref'] instanceof Observable) {
                 const elementRef = props['ref'];
                 delete props['ref'];
-                LifecycleEventsManager.onMounted(domElement, domElement, level, () => {
-                    elementRef.value = ref.deref();
+                LifecycleEventsManager.onMounted(domElement, level, () => {
+                    elementRef.value = domElement;
                 });
-                LifecycleEventsManager.onUnmounted(domElement, domElement, level, () => {
+                LifecycleEventsManager.onUnmounted(domElement, level, () => {
                     elementRef.value = null;
                 });
             }
-            const { subscribeProps, unsubscribeProps } = setProps(domElement, props);
-            LifecycleEventsManager.onMounted(domElement, domElement, level, subscribeProps);
-            LifecycleEventsManager.onUnmounted(domElement, domElement, level, unsubscribeProps);
-            if (parentComponent) {
-                LifecycleEventsManager.registerIndirect(domElement, parentComponent, parentComponent.lcEventHandlers);
+            const { connectProps, disconnectProps } = setProps(domElement, props);
+            LifecycleEventsManager.onMounted(domElement, level, connectProps);
+            LifecycleEventsManager.onUnmounted(domElement, level, disconnectProps);
+            if (parent && parent instanceof Node === false) {
+                LifecycleEventsManager.setLogicalParent(domElement, parent);
             }
-            await renderChildren(domElement, children);
+            domElement.append(...await renderVNodes(children, level + 1, domElement));
             return domElement;
         }
     }
-    async function renderFunctionalComponent(type, props, children, level) {
+    async function renderVNodes(vNodes, level, parent) {
+        vNodes = Array.isArray(vNodes) ? vNodes : [vNodes];
+        const childNodes = await Promise.all(vNodes.flat().map(async (vNode) => renderVNode(vNode, level, parent)));
+        return childNodes.flat().filter(rNode => rNode !== null);
+    }
+    let componentId = -1;
+    async function renderFunctionalComponent(type, props, children, level, parent) {
         const setupHandlers = [];
         const errorCapturedHandlers = [];
-        const lcEventHandlers = LifecycleEventsManager.createLifecycleEventHandlers(level);
+        const component = {
+            id: ++componentId,
+            mountedChildCount: 0,
+            ref: null,
+        };
+        let transientComponent = component;
+        // these callbacks should only be used during the construction of a functional component
+        // which is why we use this transient reference
+        const defineRef = (ref) => {
+            if (transientComponent) {
+                transientComponent.ref = ref;
+            }
+        };
         const componentEvents = {
             onSetup: (handler) => setupHandlers.push(handler),
             onErrorCaptured: (handler) => errorCapturedHandlers.push(handler),
-            onMounted: (handler) => lcEventHandlers.mounted.add(handler),
-            onUnmounted: (handler) => lcEventHandlers.unmounted.add(handler),
-            onReady: (handler) => lcEventHandlers.ready.add(handler),
-            onRendered: (handler) => lcEventHandlers.rendered.add(handler),
+            onMounted: (handler) => transientComponent
+                && LifecycleEventsManager.onMounted(transientComponent, level, handler),
+            onUnmounted: (handler) => transientComponent
+                && LifecycleEventsManager.onUnmounted(transientComponent, level, handler),
+            onReady: (handler) => transientComponent
+                && LifecycleEventsManager.onReady(transientComponent, level, handler),
+            onRendered: (handler) => transientComponent
+                && LifecycleEventsManager.onRendered(transientComponent, level, handler),
         };
-        const component = {
-            ref: null,
-            lcEventHandlers,
-        };
-        const defineRef = (_ref) => {
-            component.ref = new WeakRef(_ref);
-        };
-        if (props['ref'] instanceof Observable) {
-            const componentRef = props['ref'];
-            componentEvents.onMounted(() => {
-                componentRef.value = component.ref?.deref();
-            });
-            componentEvents.onUnmounted(() => {
-                componentRef.value = null;
-            });
-        }
-        let node = null;
+        let rNode = null;
         try {
             const vNode = type({ ...props, children }, componentEvents, { defineRef });
             await Promise.all(setupHandlers.map((setupHandler) => setupHandler()));
-            node = await renderVNode(vNode, level + 1, component);
+            rNode = await renderVNode(vNode, level + 1, component);
         }
         catch (error) {
             const handled = errorCapturedHandlers.some(handler => handler(error) === false);
@@ -366,18 +451,33 @@ var PlainJSX = (function (exports, utils) {
                 throw error;
             }
         }
-        return node;
+        finally {
+            transientComponent = null;
+        }
+        if (props['ref'] instanceof Observable) {
+            const componentRef = props['ref'];
+            LifecycleEventsManager.onMounted(component, level, () => {
+                componentRef.value = component.ref;
+            });
+            LifecycleEventsManager.onUnmounted(component, level, () => {
+                componentRef.value = null;
+            });
+        }
+        if (parent && parent instanceof Node === false) {
+            LifecycleEventsManager.setLogicalParent(component, parent);
+        }
+        return rNode;
     }
     function setProps(elem, props) {
         const subscribes = [];
         let subscriptions = null;
-        function subscribeProps() {
+        function connectProps() {
             if (subscriptions !== null) {
                 return;
             }
             subscriptions = subscribes.map(subscribe => subscribe());
         }
-        function unsubscribeProps() {
+        function disconnectProps() {
             if (subscriptions === null) {
                 return;
             }
@@ -400,11 +500,24 @@ var PlainJSX = (function (exports, utils) {
                         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
                         elem[key] = value;
                     }));
+                    // two way updates for input element
+                    if (elem instanceof HTMLInputElement
+                        && ['value', 'valueAsNumber', 'valueAsDate', 'checked', 'files'].includes(key)) {
+                        const handleChange = () => {
+                            value.value = elem[key];
+                        };
+                        subscribes.push(() => {
+                            elem.addEventListener('change', handleChange);
+                            return {
+                                unsubscribe: () => elem.removeEventListener('change', handleChange),
+                            };
+                        });
+                    }
                     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
                     elem[key] = value.value;
                 }
                 else {
-                    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+                    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
                     elem[key] = value;
                 }
             }
@@ -417,7 +530,7 @@ var PlainJSX = (function (exports, utils) {
                 }
             }
         });
-        return { subscribeProps, unsubscribeProps };
+        return { connectProps, disconnectProps };
     }
     function splitNamespace(tagNS) {
         const [ns, tag] = tagNS.split(':', 1);
@@ -427,9 +540,13 @@ var PlainJSX = (function (exports, utils) {
         return [XMLNamespaces[ns], tag];
     }
 
+    exports.For = For;
     exports.Fragment = Fragment;
+    exports.Show = Show;
+    exports.With = With;
     exports.createElement = createElement;
     exports.createObservable = createObservable;
+    exports.createRef = createRef;
     exports.h = createElement;
     exports.render = render;
 

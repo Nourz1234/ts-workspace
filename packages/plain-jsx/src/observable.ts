@@ -1,4 +1,5 @@
 import type { Action, MaybePromise } from '@lib/utils';
+import type { FunctionalComponent } from '.';
 
 export interface Subscription {
     unsubscribe: Action;
@@ -60,4 +61,12 @@ export class Observable<T> {
 
 export function createObservable<T>(initialValue: T) {
     return new Observable<T>(initialValue);
+}
+
+export function createRef<
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    T extends Element | FunctionalComponent<never, any>,
+    U = T extends Element ? T : T extends FunctionalComponent<never, infer TRef> ? TRef : never,
+>(): Observable<U | null> {
+    return new Observable<U | null>(null);
 }

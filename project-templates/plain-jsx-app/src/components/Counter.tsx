@@ -21,7 +21,7 @@ const Counter: FunctionalComponent<CounterProps, CounterRefType> = (
 
     return (
         <button type='button' onClick={increment}>
-            count is {count}
+            Count is {count}
         </button>
     );
 };

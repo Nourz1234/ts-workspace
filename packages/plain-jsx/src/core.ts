@@ -1,17 +1,20 @@
 import type { MaybePromise } from '@lib/utils';
 import { hasKey } from '@lib/utils';
-import type { LifecycleEventHandlers } from './events';
 import { LifecycleEventsManager } from './events';
 import type { Subscription } from './observable';
 import { Observable } from './observable';
+import type { CustomRenderFn, ShowProps } from './reactive';
+import { For, renderFor, renderShow, renderWith, Show, With } from './reactive';
 import { ReactiveNode } from './reactive';
+import { _Sentinel } from './sintenel';
 import type {
+    Component,
     ComponentEvents,
     DOMProps,
     ErrorCapturedHandler,
-    EventHandler,
     FunctionalComponent,
     PropsType,
+    RNode,
     SetupHandler,
     SVGProps,
     VNode,
@@ -24,36 +27,33 @@ const XMLNamespaces = {
 
 export const Fragment = 'Fragment';
 
+/* built-in components that have special handling */
+const BuiltinComponents = new Map<unknown, CustomRenderFn>(
+    [
+        [Show, renderShow],
+        [With, renderWith],
+        [For, renderFor],
+    ],
+);
+
 export function createVNode(
     type: string | FunctionalComponent,
-    props: PropsType = {},
-    children: VNode[] = [],
-    isDev = false,
+    props?: PropsType,
+    children?: VNode | VNode[],
 ): VNode {
-    return { type, props, children, isDev };
+    return { type, props: props ?? {}, children };
 }
 
 export function jsx(
     type: string | FunctionalComponent,
     props: { children?: VNodeChildren },
 ): VNode {
-    let children = props.children ?? [];
-    children = Array.isArray(children) ? children : [children];
+    const { children } = props;
     delete props.children;
-    return createVNode(type, props, children, false);
+    return createVNode(type, props, children);
 }
 
-export { jsx as jsxs };
-
-export function jsxDEV(
-    type: string | FunctionalComponent,
-    props: { children?: VNodeChildren },
-) {
-    let children = props.children ?? [];
-    children = Array.isArray(children) ? children : [children];
-    delete props.children;
-    return createVNode(type, props, children, true);
-}
+export { jsx as jsxDEV, jsx as jsxs };
 
 export function createElement(
     tag: string | FunctionalComponent,
@@ -63,65 +63,68 @@ export function createElement(
     return createVNode(tag, props, children);
 }
 
-export async function render(
-    root: Element | DocumentFragment,
-    element: VNode,
-    handlers?: { onMounted: EventHandler },
-) {
+export async function render(root: Element | DocumentFragment, vNode: VNode) {
     LifecycleEventsManager.initialize();
-    const node = await renderVNode(element, 1);
-    if (node === null) {
+    const rNode = await renderVNode(vNode, 1);
+    if (rNode === null) {
         return;
     }
 
-    // NEEDS FIXING!!!!!!!!!!!!!!!!!!!!!!
-    if (handlers) {
-        LifecycleEventsManager.onMounted(node, node, 0, handlers.onMounted);
+    if (Array.isArray(rNode)) {
+        root.append(...rNode);
     }
-
-    root.appendChild(node);
+    else {
+        root.appendChild(rNode);
+    }
 }
 
 async function renderVNode(
-    element: VNode,
+    vNode: VNode,
     level: number,
-    parentComponent?: InternalComponent,
-): Promise<Node | null> {
-    if (element === undefined || element === null || typeof element === 'boolean') {
+    parent?: Component | ParentNode,
+): Promise<RNode> {
+    if (vNode === undefined || vNode === null || typeof vNode === 'boolean') {
         return null;
     }
-    else if (typeof element === 'string' || typeof element === 'number') {
-        return document.createTextNode(String(element));
+    else if (typeof vNode === 'string' || typeof vNode === 'number') {
+        return document.createTextNode(String(vNode));
     }
-    else if (element instanceof Observable) {
+    else if (vNode instanceof Observable) {
         const reactiveNode = new ReactiveNode();
-        reactiveNode.update(await renderVNode(element.value, level + 1));
+        reactiveNode.update(await renderVNodes(vNode.value, level, parent));
 
-        element.subscribe(async (newElement) => {
-            reactiveNode.update(await renderVNode(newElement, level + 1));
-        });
+        if (parent) {
+            let subscription: Subscription | null = null;
+            LifecycleEventsManager.onMounted(parent, level, () => {
+                subscription = vNode.subscribe(async (value) => {
+                    reactiveNode.update(await renderVNodes(value, level, parent));
+                });
+            });
+            LifecycleEventsManager.onUnmounted(parent, level, () => {
+                subscription?.unsubscribe();
+                subscription = null;
+            });
+        }
         return reactiveNode.getRoot();
     }
 
-    const renderChildren = async (
-        node: Element | DocumentFragment,
-        children: VNode[],
-        parentComponent?: InternalComponent,
-    ) => {
-        const childNodes = await Promise.all(
-            children.flat().map(async child => renderVNode(child, level + 1, parentComponent)),
-        );
-        node.append(...childNodes.filter(node => node !== null));
-    };
+    const { type, props, children } = vNode;
 
-    const { type, props, children } = element;
+    const renderBuiltin = BuiltinComponents.get(type);
+    if (renderBuiltin) {
+        return await renderBuiltin(
+            props,
+            children,
+            async (vNodes: VNode | VNode[]) => renderVNodes(vNodes, level, parent),
+        );
+    }
+
+    /* general handling */
     if (typeof type === 'function') {
-        return await renderFunctionalComponent(type, props, children, level + 1);
+        return await renderFunctionalComponent(type, props, children, level + 1, parent);
     }
     else if (type === Fragment) {
-        const fragment = document.createDocumentFragment();
-        await renderChildren(fragment, children, parentComponent);
-        return fragment;
+        return await renderVNodes(children, level + 1, parent);
     }
     else {
         const hasNS = type.includes(':');
@@ -131,82 +134,88 @@ async function renderVNode(
             : document.createElement(type);
 
         // handle ref prop
-        const ref = new WeakRef(domElement);
         if (props['ref'] instanceof Observable) {
             const elementRef = props['ref'];
             delete props['ref'];
 
-            LifecycleEventsManager.onMounted(domElement, domElement, level, () => {
-                elementRef.value = ref.deref();
+            LifecycleEventsManager.onMounted(domElement, level, () => {
+                elementRef.value = domElement;
             });
-            LifecycleEventsManager.onUnmounted(domElement, domElement, level, () => {
+            LifecycleEventsManager.onUnmounted(domElement, level, () => {
                 elementRef.value = null;
             });
         }
 
-        const { subscribeProps, unsubscribeProps } = setProps(domElement, props);
-        LifecycleEventsManager.onMounted(domElement, domElement, level, subscribeProps);
-        LifecycleEventsManager.onUnmounted(domElement, domElement, level, unsubscribeProps);
-        if (parentComponent) {
-            LifecycleEventsManager.registerIndirect(
-                domElement,
-                parentComponent,
-                parentComponent.lcEventHandlers,
-            );
+        const { connectProps, disconnectProps } = setProps(domElement, props);
+        LifecycleEventsManager.onMounted(domElement, level, connectProps);
+        LifecycleEventsManager.onUnmounted(domElement, level, disconnectProps);
+        if (parent && parent instanceof Node === false) {
+            LifecycleEventsManager.setLogicalParent(domElement, parent);
         }
-        await renderChildren(domElement, children);
+        domElement.append(...await renderVNodes(children, level + 1, domElement));
         return domElement;
     }
 }
 
-interface InternalComponent {
-    ref: WeakRef<object> | null;
-    lcEventHandlers: LifecycleEventHandlers;
+async function renderVNodes(
+    vNodes: VNode | VNode[],
+    level: number,
+    parent?: Component | ParentNode,
+): Promise<ChildNode[]> {
+    vNodes = Array.isArray(vNodes) ? vNodes : [vNodes];
+    const childNodes = await Promise.all(
+        vNodes.flat().map(async vNode => renderVNode(vNode, level, parent)),
+    );
+    return childNodes.flat().filter(rNode => rNode !== null);
 }
 
+let componentId = -1;
 async function renderFunctionalComponent(
     type: FunctionalComponent,
     props: PropsType,
-    children: VNode[],
+    children: VNode | VNode[] | null,
     level: number,
-): Promise<Node | null> {
+    parent?: Component | ParentNode,
+): Promise<RNode> {
     const setupHandlers: SetupHandler[] = [];
     const errorCapturedHandlers: ErrorCapturedHandler[] = [];
-    const lcEventHandlers = LifecycleEventsManager.createLifecycleEventHandlers(level);
 
-    const componentEvents: ComponentEvents = {
-        onSetup: (handler: SetupHandler) => setupHandlers.push(handler),
-        onErrorCaptured: (handler: ErrorCapturedHandler) => errorCapturedHandlers.push(handler),
-        onMounted: (handler: EventHandler) => lcEventHandlers.mounted.add(handler),
-        onUnmounted: (handler: EventHandler) => lcEventHandlers.unmounted.add(handler),
-        onReady: (handler: EventHandler) => lcEventHandlers.ready.add(handler),
-        onRendered: (handler: EventHandler) => lcEventHandlers.rendered.add(handler),
-    };
-
-    const component: InternalComponent = {
+    const component: Component = {
+        id: ++componentId,
+        mountedChildCount: 0,
         ref: null,
-        lcEventHandlers,
     };
-    const defineRef = (_ref: object) => {
-        component.ref = new WeakRef(_ref);
+    let transientComponent: Component | null = component;
+
+    // these callbacks should only be used during the construction of a functional component
+    // which is why we use this transient reference
+    const defineRef = (ref: unknown) => {
+        if (transientComponent) {
+            transientComponent.ref = ref;
+        }
+    };
+    const componentEvents: ComponentEvents = {
+        onSetup: (handler) => setupHandlers.push(handler),
+        onErrorCaptured: (handler) => errorCapturedHandlers.push(handler),
+        onMounted: (handler) =>
+            transientComponent
+            && LifecycleEventsManager.onMounted(transientComponent, level, handler),
+        onUnmounted: (handler) =>
+            transientComponent
+            && LifecycleEventsManager.onUnmounted(transientComponent, level, handler),
+        onReady: (handler) =>
+            transientComponent
+            && LifecycleEventsManager.onReady(transientComponent, level, handler),
+        onRendered: (handler) =>
+            transientComponent
+            && LifecycleEventsManager.onRendered(transientComponent, level, handler),
     };
 
-    if (props['ref'] instanceof Observable) {
-        const componentRef = props['ref'];
-
-        componentEvents.onMounted(() => {
-            componentRef.value = component.ref?.deref();
-        });
-        componentEvents.onUnmounted(() => {
-            componentRef.value = null;
-        });
-    }
-
-    let node: Node | null = null;
+    let rNode: RNode = null;
     try {
         const vNode = type({ ...props, children }, componentEvents, { defineRef });
         await Promise.all(setupHandlers.map((setupHandler): MaybePromise<void> => setupHandler()));
-        node = await renderVNode(vNode, level + 1, component);
+        rNode = await renderVNode(vNode, level + 1, component);
     }
     catch (error) {
         const handled = errorCapturedHandlers.some(handler => handler(error) === false);
@@ -214,21 +223,39 @@ async function renderFunctionalComponent(
             throw error;
         }
     }
+    finally {
+        transientComponent = null;
+    }
 
-    return node;
+    if (props['ref'] instanceof Observable) {
+        const componentRef = props['ref'];
+
+        LifecycleEventsManager.onMounted(component, level, () => {
+            componentRef.value = component.ref;
+        });
+        LifecycleEventsManager.onUnmounted(component, level, () => {
+            componentRef.value = null;
+        });
+    }
+
+    if (parent && parent instanceof Node === false) {
+        LifecycleEventsManager.setLogicalParent(component, parent);
+    }
+
+    return rNode;
 }
 
-function setProps<T extends HTMLElement | SVGElement>(elem: T, props: object) {
+function setProps<T extends HTMLElement | SVGElement>(elem: T, props: PropsType) {
     const subscribes: (() => Subscription)[] = [];
     let subscriptions: Subscription[] | null = null;
 
-    function subscribeProps() {
+    function connectProps() {
         if (subscriptions !== null) {
             return;
         }
         subscriptions = subscribes.map(subscribe => subscribe());
     }
-    function unsubscribeProps() {
+    function disconnectProps() {
         if (subscriptions === null) {
             return;
         }
@@ -254,12 +281,30 @@ function setProps<T extends HTMLElement | SVGElement>(elem: T, props: object) {
                         elem[key] = value;
                     })
                 );
+
+                // two way updates for input element
+                if (
+                    elem instanceof HTMLInputElement
+                    && ['value', 'valueAsNumber', 'valueAsDate', 'checked', 'files'].includes(key)
+                ) {
+                    const handleChange = () => {
+                        value.value = elem[key];
+                    };
+
+                    subscribes.push(() => {
+                        elem.addEventListener('change', handleChange);
+                        return {
+                            unsubscribe: () => elem.removeEventListener('change', handleChange),
+                        };
+                    });
+                }
+
                 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
                 elem[key] = value.value;
             }
             else {
-                // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-                elem[key] = value;
+                // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
+                elem[key] = value as any;
             }
         }
         else {
@@ -272,7 +317,7 @@ function setProps<T extends HTMLElement | SVGElement>(elem: T, props: object) {
         }
     });
 
-    return { subscribeProps, unsubscribeProps };
+    return { connectProps, disconnectProps };
 }
 
 function splitNamespace(tagNS: string) {
@@ -303,8 +348,7 @@ export declare namespace JSX {
             [K in keyof SVGElementTagNameMap as `svg:${K}`]: PropsOf<SVGElementTagNameMap[K]>;
         };
 
-    // eslint-disable-next-line @typescript-eslint/no-empty-object-type
     interface IntrinsicElements extends BaseIntrinsicElements {
-        // allow extending
+        [Show]: ShowProps;
     }
 }

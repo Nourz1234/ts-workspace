@@ -41,5 +41,8 @@ class Observable {
 function createObservable(initialValue) {
     return new Observable(initialValue);
 }
+function createRef() {
+    return new Observable(null);
+}
 
-export { Observable, createObservable };
+export { Observable, createObservable, createRef };

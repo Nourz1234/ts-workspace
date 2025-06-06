@@ -2,7 +2,7 @@ import { createObservable, type FunctionalComponent } from '@lib/plain-jsx';
 import { sleep } from '@lib/utils';
 
 async function fetchMessage() {
-    await sleep(1000);
+    await sleep(500);
     return 'Async message!';
 }
 
